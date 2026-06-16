@@ -5,7 +5,6 @@ import qs.config
 import qs.services
 import qs.utils
 import "components"
-import qs.modules.yin as Yin
 import Quickshell
 import Quickshell.Bluetooth
 import Quickshell.Services.SystemTray
@@ -47,7 +46,7 @@ Item {
     }
 
     readonly property real leftClusterWidth: itemWidth("logo") + itemWidth("workspaces") + Appearance.spacing.normal
-    readonly property real rightClusterWidth: itemWidth("tray") + itemWidth("clock") + itemWidth("statusIcons") + itemWidth("yin") + itemWidth("manga") + itemWidth("power") + Appearance.spacing.normal * 5
+    readonly property real rightClusterWidth: itemWidth("tray") + itemWidth("clock") + itemWidth("statusIcons") + itemWidth("manga") + itemWidth("power") + Appearance.spacing.normal * 5
     readonly property real centerChipOffset: Math.max(-root.width * 0.14, Math.min(root.width * 0.14, (rightClusterWidth - leftClusterWidth) / 2))
 
     function setPopout(name: string, item: Item): void {
@@ -248,15 +247,6 @@ Item {
                     delegate: WrappedLoader {
                         visible: enabled && !root.hasFullscreen
                         sourceComponent: TopStatusIcons {}
-                    }
-                }
-                DelegateChoice {
-                    roleValue: "yin"
-                    delegate: WrappedLoader {
-                        visible: enabled && !root.hasFullscreen
-                        sourceComponent: Yin.TopBarButton {
-                            visibilities: root.visibilities
-                        }
                     }
                 }
                 DelegateChoice {
