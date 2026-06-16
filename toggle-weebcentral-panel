@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+STATE_PATH = Path.home() / ".local/state/weebcentral-panel/address"
+VISIBLE_PATH = Path.home() / ".local/state/weebcentral-panel/visible"
+VERSION_PATH = Path.home() / ".local/state/weebcentral-panel/version"
+CONFIG_PATH = Path.home() / ".config/caelestia/shell.json"
+MANGA_CONFIG_PATH = Path.home() / ".config/core/manga.conf"
+PANEL_VERSION = "2026-05-08-left-scrollbar-shell-panel"
+SPECIAL_WORKSPACE = "special:weebcentral"
+MANGA_COMMAND = [str(Path.home() / ".local/bin/core-manga")]
+
+
+def run(command: list[str], capture: bool = False) -> str:
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=capture,
+        text=True,
+    )
+    if capture:
+        return result.stdout
+    return ""
+
+
+def hypr_json(*args: str):
+    raw = run(["hyprctl", "-j", *args], capture=True)
+    return json.loads(raw or "null")
+
+
+def dispatch(name: str, value: str) -> None:
+    run(["hyprctl", "dispatch", name, value])
+
+
+def normalise_address(value: str | None) -> str:
+    return (value or "").strip().removeprefix("0x")
+
+
+def load_clients() -> list[dict]:
+    clients = hypr_json("clients")
+    return clients if isinstance(clients, list) else []
+
+
+def load_monitors() -> list[dict]:
+    monitors = hypr_json("monitors")
+    return monitors if isinstance(monitors, list) else []
+
+
+def active_window_address() -> str:
+    active = hypr_json("activewindow")
+    if isinstance(active, dict):
+        return normalise_address(active.get("address"))
+    return ""
+
+
+def active_workspace_id() -> int | None:
+    workspace = hypr_json("activeworkspace")
+    if isinstance(workspace, dict):
+        value = workspace.get("id")
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def read_state() -> str:
+    try:
+        return normalise_address(STATE_PATH.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
+def write_state(address: str) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(normalise_address(address), encoding="utf-8")
+
+
+def write_visible(visible: bool) -> None:
+    VISIBLE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VISIBLE_PATH.write_text("1" if visible else "0", encoding="utf-8")
+
+
+def read_version() -> str:
+    try:
+        return VERSION_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def write_version() -> None:
+    VERSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VERSION_PATH.write_text(PANEL_VERSION, encoding="utf-8")
+
+
+def read_shell_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def read_manga_config() -> dict[str, str]:
+    config = {}
+    try:
+        lines = MANGA_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return config
+
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key and not key.lstrip().startswith("#"):
+            config[key.strip()] = value.strip()
+
+    return config
+
+
+def int_config(config: dict[str, str], key: str, default: int = 0) -> int:
+    try:
+        return int(config.get(key, str(default)) or default)
+    except ValueError:
+        return default
+
+
+def find_client(address: str, clients: list[dict]) -> dict | None:
+    if not address:
+        return None
+
+    for client in clients:
+        if normalise_address(client.get("address")) == address:
+            return client
+    return None
+
+
+def find_existing_panel(clients: list[dict]) -> dict | None:
+    saved = find_client(read_state(), clients)
+    if saved:
+        return saved
+
+    for client in clients:
+        if is_panel_client(client):
+            return client
+
+    return None
+
+
+def is_panel_client(client: dict) -> bool:
+    class_name = f"{client.get('class', '')} {client.get('initialClass', '')}".lower()
+    title = f"{client.get('title', '')} {client.get('initialTitle', '')}".lower()
+    panel_class = any(token in class_name for token in ("core-manga", "qml6", "qmlscene"))
+    panel_title = any(token in title for token in ("core manga", "weebcentral", "manga panel"))
+    return panel_title or (panel_class and ("zen" not in class_name))
+
+
+def clamp(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(value, maximum))
+
+
+def shell_panel_metrics() -> tuple[int, int]:
+    config = read_shell_config()
+    border = int(config.get("border", {}).get("thickness", 8))
+    inner_width = int(config.get("bar", {}).get("sizes", {}).get("innerWidth", 38))
+    sidebar_width = int(config.get("sidebar", {}).get("sizes", {}).get("width", 404))
+    bar_height = max(46, inner_width + max(4, border))
+    panel_top = max(border, int(round(bar_height - max(2, border / 3))))
+    return panel_top, sidebar_width
+
+
+def panel_geometry(monitor: dict) -> tuple[int, int, int, int]:
+    width = int(monitor.get("width", 1920))
+    height = int(monitor.get("height", 1080))
+    x_base = int(monitor.get("x", 0))
+    y_base = int(monitor.get("y", 0))
+    panel_top, sidebar_width = shell_panel_metrics()
+    border = int(read_shell_config().get("border", {}).get("thickness", 8))
+    manga_config = read_manga_config()
+    configured_width = int_config(manga_config, "width")
+
+    target_width = configured_width or int(round(width / 3))
+    panel_width = clamp(target_width, 560, max(560, width - border * 2 - 96))
+    panel_height = max(360, height - panel_top - border)
+    x = x_base + width - panel_width - border
+    y = y_base + panel_top
+    return panel_width, panel_height, x, y
+
+
+def focused_monitor(monitors: list[dict]) -> dict | None:
+    for monitor in monitors:
+        if monitor.get("focused"):
+            return monitor
+    return monitors[0] if monitors else None
+
+
+def client_workspace_id(client: dict | None) -> int | None:
+    if not client:
+        return None
+
+    workspace = client.get("workspace")
+    if isinstance(workspace, dict):
+        value = workspace.get("id")
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def show_panel(client: dict, monitor: dict, focus: bool) -> None:
+    address = normalise_address(client.get("address"))
+    workspace_id = monitor.get("activeWorkspace", {}).get("id")
+    panel_width, panel_height, x_pos, y_pos = panel_geometry(monitor)
+    selector = f"address:0x{address}"
+
+    if workspace_id:
+        dispatch("movetoworkspacesilent", f"{workspace_id},{selector}")
+
+    dispatch("setfloating", selector)
+    dispatch("resizewindowpixel", f"exact {panel_width} {panel_height},{selector}")
+    dispatch("movewindowpixel", f"exact {x_pos} {y_pos},{selector}")
+    if focus:
+        dispatch("focuswindow", selector)
+    write_state(address)
+    write_visible(True)
+    write_version()
+
+
+def hide_panel(client: dict) -> None:
+    address = normalise_address(client.get("address"))
+    if not address:
+        return
+
+    dispatch("movetoworkspacesilent", f"{SPECIAL_WORKSPACE},address:0x{address}")
+    write_state(address)
+    write_visible(False)
+
+
+def close_panel(client: dict) -> None:
+    address = normalise_address(client.get("address"))
+    if not address:
+        return
+
+    dispatch("closewindow", f"address:0x{address}")
+    write_state("")
+    write_visible(False)
+    time.sleep(0.4)
+
+
+def wait_for_new_window(existing_addresses: set[str]) -> dict | None:
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        clients = load_clients()
+        new_clients = [client for client in clients if normalise_address(client.get("address")) not in existing_addresses]
+        panel_clients = [
+            client for client in new_clients
+            if is_panel_client(client)
+        ]
+        if panel_clients:
+            return panel_clients[-1]
+        if len(new_clients) == 1:
+            return new_clients[0]
+        time.sleep(0.2)
+    return None
+
+
+def launch_panel() -> dict | None:
+    existing = {normalise_address(client.get("address")) for client in load_clients()}
+    subprocess.Popen(
+        MANGA_COMMAND,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return wait_for_new_window(existing)
+
+
+def parse_args() -> tuple[str, bool]:
+    action = "toggle"
+    focus = True
+
+    for arg in sys.argv[1:]:
+        if arg == "--no-focus":
+            focus = False
+        elif arg in {"show", "hide", "toggle"}:
+            action = arg
+
+    return action, focus
+
+
+def main() -> int:
+    action, focus = parse_args()
+    monitors = load_monitors()
+    monitor = focused_monitor(monitors)
+    if not monitor:
+        return 1
+
+    clients = load_clients()
+    existing = find_existing_panel(clients)
+    active_address = active_window_address()
+    workspace_id = active_workspace_id()
+
+    if action == "hide":
+        if existing:
+            hide_panel(existing)
+        else:
+            write_visible(False)
+        return 0
+
+    if existing and read_version() != PANEL_VERSION:
+        close_panel(existing)
+        existing = None
+
+    if action == "show":
+        if existing:
+            show_panel(existing, monitor, focus)
+            return 0
+
+        created = launch_panel()
+        if not created:
+            write_visible(False)
+            return 1
+
+        show_panel(created, monitor, focus)
+        return 0
+
+    if existing:
+        address = normalise_address(existing.get("address"))
+        if client_workspace_id(existing) == workspace_id and address == active_address:
+            hide_panel(existing)
+            return 0
+
+        show_panel(existing, monitor, True)
+        return 0
+
+    created = launch_panel()
+    if not created:
+        write_visible(False)
+        return 1
+
+    show_panel(created, monitor, True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
